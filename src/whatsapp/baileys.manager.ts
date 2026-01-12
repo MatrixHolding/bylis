@@ -282,7 +282,7 @@ class BaileysManager {
       // Log event
       await this.logEvent(agencyId, 'message.sent', { to, text: text.substring(0, 100), messageId: result?.key?.id });
 
-      return { success: true, messageId: result?.key?.id };
+      return { success: true, messageId: result?.key?.id || undefined };
     } catch (error: any) {
       console.error('[BAILEYS] Send message error:', error);
       return { success: false, error: error.message };
