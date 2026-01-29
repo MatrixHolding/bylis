@@ -178,11 +178,17 @@ class BaileysManager {
         auth: state,
         printQRInTerminal: true,
         logger: logger as any,
-        browser: [browserName, 'Chrome', '120.0.0']
+        browser: [browserName, 'Chrome', '120.0.0'],
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        qrTimeout: 60000,
+        retryRequestDelayMs: 500,
+        markOnlineOnConnect: false
       });
 
       session.socket = socket;
-      console.log(`[BAILEYS] Socket created successfully`);
+      console.log(`[BAILEYS] Socket created successfully with extended timeouts`);
 
       // Handle connection events
       socket.ev.on('connection.update', async (update) => {
@@ -208,42 +214,72 @@ class BaileysManager {
     }
 
     // Wait for QR code or connection
+    // Note: We DON'T resolve on 'disconnected' as Baileys may reconnect and generate QR
     console.log(`[BAILEYS] Waiting for QR code or connection (max 90s)...`);
     return new Promise((resolve) => {
       let resolved = false;
+      let pollCount = 0;
+      const maxPolls = 90; // 90 seconds with 1s interval
 
       const checkInterval = setInterval(() => {
+        pollCount++;
         const currentSession = this.sessions.get(agencyId);
-        if (currentSession && !resolved) {
-          console.log(`[BAILEYS] Polling: status=${currentSession.status}, hasQR=${!!currentSession.qrCode}`);
 
-          if (currentSession.qrCode || currentSession.status === 'connected') {
+        if (currentSession && !resolved) {
+          // Only log every 5 polls to reduce noise
+          if (pollCount % 5 === 0) {
+            console.log(`[BAILEYS] Polling #${pollCount}: status=${currentSession.status}, hasQR=${!!currentSession.qrCode}`);
+          }
+
+          // SUCCESS: Got QR code or connected
+          if (currentSession.qrCode) {
             resolved = true;
             clearInterval(checkInterval);
-            console.log(`[BAILEYS] Resolving with status: ${currentSession.status}`);
+            console.log(`[BAILEYS] SUCCESS - Got QR code after ${pollCount}s`);
             resolve({
               sessionId,
               qrCode: currentSession.qrCode,
-              status: currentSession.status
+              status: 'pending'
+            });
+          } else if (currentSession.status === 'connected') {
+            resolved = true;
+            clearInterval(checkInterval);
+            console.log(`[BAILEYS] SUCCESS - Connected after ${pollCount}s`);
+            resolve({
+              sessionId,
+              qrCode: null,
+              status: 'connected'
+            });
+          }
+
+          // Max polls reached
+          if (pollCount >= maxPolls && !resolved) {
+            resolved = true;
+            clearInterval(checkInterval);
+            console.log(`[BAILEYS] TIMEOUT after ${pollCount}s - Final state: status=${currentSession.status}`);
+            resolve({
+              sessionId,
+              qrCode: currentSession.qrCode || null,
+              status: currentSession.status || 'timeout'
             });
           }
         }
-      }, 1000); // Check every 1 second instead of 500ms
+      }, 1000);
 
-      // Timeout after 90 seconds (increased from 60)
+      // Safety timeout after 95 seconds
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
           clearInterval(checkInterval);
           const currentSession = this.sessions.get(agencyId);
-          console.log(`[BAILEYS] TIMEOUT - Resolving with current state: status=${currentSession?.status}, hasQR=${!!currentSession?.qrCode}`);
+          console.log(`[BAILEYS] SAFETY TIMEOUT - status=${currentSession?.status}`);
           resolve({
             sessionId,
             qrCode: currentSession?.qrCode || null,
             status: currentSession?.status || 'timeout'
           });
         }
-      }, 90000);
+      }, 95000);
     });
   }
 
@@ -295,9 +331,15 @@ class BaileysManager {
     // Connection status
     if (connection === 'close') {
       const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const errorMessage = (lastDisconnect?.error as Error)?.message;
       const shouldReconnect = reason !== DisconnectReason.loggedOut;
 
-      console.log(`[BAILEYS] Connection closed for ${agencyId}, reason: ${reason}`);
+      console.log(`[BAILEYS] === CONNECTION CLOSED ===`);
+      console.log(`[BAILEYS] Entity: ${agencyId}`);
+      console.log(`[BAILEYS] Reason code: ${reason}`);
+      console.log(`[BAILEYS] Error message: ${errorMessage || 'none'}`);
+      console.log(`[BAILEYS] DisconnectReason values: loggedOut=${DisconnectReason.loggedOut}, restartRequired=${DisconnectReason.restartRequired}, connectionClosed=${DisconnectReason.connectionClosed}`);
+      console.log(`[BAILEYS] Should reconnect: ${shouldReconnect}`);
       session.status = 'disconnected';
 
       await this.updateSessionInDB(agencyId, {
