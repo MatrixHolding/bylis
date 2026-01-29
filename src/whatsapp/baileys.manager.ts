@@ -213,8 +213,12 @@ class BaileysManager {
       });
 
       if (shouldReconnect) {
-        console.log(`[BAILEYS] Reconnecting ${agencyId}...`);
-        setTimeout(() => this.createSession(agencyId), 5000);
+        console.log(`[BAILEYS] Reconnecting ${agencyId} (project: ${session.project})...`);
+        // Pass the same project and webhook options for reconnection
+        setTimeout(() => this.createSession(agencyId, {
+          project: session.project,
+          webhookUrl: session.webhookUrl || undefined
+        }), 5000);
       }
     } else if (connection === 'open') {
       console.log(`[BAILEYS] Connected for ${session.project} entity ${agencyId}`);
