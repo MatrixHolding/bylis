@@ -102,4 +102,18 @@ router.get('/health', (req: Request, res: Response) => {
   });
 });
 
+// GET /api/baileys/debug - Get debug logs
+router.get('/debug', (req: Request, res: Response) => {
+  const limit = parseInt(req.query.limit as string) || 50;
+  const logs = baileysManager.getDebugLogs(limit);
+  const sessions = baileysManager.getAllSessions();
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    sessions,
+    logsCount: logs.length,
+    logs
+  });
+});
+
 export default router;

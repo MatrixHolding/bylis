@@ -36,6 +36,23 @@ interface Session {
   webhookUrl: string | null;
 }
 
+// Store last N log entries for debugging
+const debugLogs: { timestamp: string; message: string; data?: any }[] = [];
+const MAX_DEBUG_LOGS = 100;
+
+function debugLog(message: string, data?: any) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    message,
+    data
+  };
+  debugLogs.push(entry);
+  if (debugLogs.length > MAX_DEBUG_LOGS) {
+    debugLogs.shift();
+  }
+  console.log(`[BAILEYS] ${message}`, data ? JSON.stringify(data) : '');
+}
+
 class BaileysManager {
   private sessions: Map<string, Session> = new Map();
   private supabase: SupabaseClient;
@@ -171,8 +188,8 @@ class BaileysManager {
 
     // Create socket with browser name based on project
     const browserName = project === 'wakhaflow' ? 'WakhaFlow' : 'AIOD';
-    console.log(`[BAILEYS] Creating WASocket with browser: ${browserName}`);
-    console.log(`[BAILEYS] makeWASocket START at ${new Date().toISOString()}`);
+    debugLog(`Creating WASocket with browser: ${browserName}`);
+    debugLog(`makeWASocket START`);
 
     let socket: WASocket;
     try {
@@ -189,25 +206,19 @@ class BaileysManager {
         markOnlineOnConnect: false
       });
 
-      console.log(`[BAILEYS] makeWASocket DONE at ${new Date().toISOString()}`);
-      console.log(`[BAILEYS] Socket object created:`, typeof socket);
-      console.log(`[BAILEYS] Socket.ev exists:`, !!socket?.ev);
-
+      debugLog(`makeWASocket DONE`, { socketType: typeof socket, hasEv: !!socket?.ev });
       session.socket = socket;
 
       // Handle connection events
-      console.log(`[BAILEYS] Attaching connection.update listener...`);
+      debugLog(`Attaching connection.update listener`);
       socket.ev.on('connection.update', async (update) => {
-        console.log(`[BAILEYS] === EVENT: connection.update ===`);
-        console.log(`[BAILEYS] Update received at ${new Date().toISOString()}`);
-        console.log(`[BAILEYS] Update data:`, JSON.stringify(update, null, 2));
+        debugLog(`EVENT: connection.update`, update);
         await this.handleConnectionUpdate(agencyId, update);
       });
-      console.log(`[BAILEYS] connection.update listener attached`);
 
       // Handle credentials update
       socket.ev.on('creds.update', () => {
-        console.log(`[BAILEYS] === EVENT: creds.update ===`);
+        debugLog(`EVENT: creds.update`);
         saveCreds();
       });
 
@@ -216,7 +227,7 @@ class BaileysManager {
         await this.handleMessagesUpsert(agencyId, m);
       });
 
-      console.log(`[BAILEYS] All event listeners attached successfully`);
+      debugLog(`All event listeners attached successfully`);
 
     } catch (socketError: any) {
       console.error(`[BAILEYS] Socket creation FAILED:`, socketError);
@@ -344,14 +355,25 @@ class BaileysManager {
     if (connection === 'close') {
       const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const errorMessage = (lastDisconnect?.error as Error)?.message;
+      const errorStack = (lastDisconnect?.error as Error)?.stack;
       const shouldReconnect = reason !== DisconnectReason.loggedOut;
 
-      console.log(`[BAILEYS] === CONNECTION CLOSED ===`);
-      console.log(`[BAILEYS] Entity: ${agencyId}`);
-      console.log(`[BAILEYS] Reason code: ${reason}`);
-      console.log(`[BAILEYS] Error message: ${errorMessage || 'none'}`);
-      console.log(`[BAILEYS] DisconnectReason values: loggedOut=${DisconnectReason.loggedOut}, restartRequired=${DisconnectReason.restartRequired}, connectionClosed=${DisconnectReason.connectionClosed}`);
-      console.log(`[BAILEYS] Should reconnect: ${shouldReconnect}`);
+      debugLog(`=== CONNECTION CLOSED ===`, {
+        agencyId,
+        reason,
+        errorMessage,
+        errorStack: errorStack?.substring(0, 500),
+        disconnectReasons: {
+          loggedOut: DisconnectReason.loggedOut,
+          restartRequired: DisconnectReason.restartRequired,
+          connectionClosed: DisconnectReason.connectionClosed,
+          connectionLost: DisconnectReason.connectionLost,
+          connectionReplaced: DisconnectReason.connectionReplaced,
+          timedOut: DisconnectReason.timedOut,
+          badSession: DisconnectReason.badSession
+        },
+        shouldReconnect
+      });
       session.status = 'disconnected';
 
       await this.updateSessionInDB(agencyId, {
@@ -593,6 +615,25 @@ class BaileysManager {
       await session.socket.logout();
       this.sessions.delete(agencyId);
     }
+  }
+
+  // Get debug logs
+  getDebugLogs(limit: number = 50): typeof debugLogs {
+    return debugLogs.slice(-limit);
+  }
+
+  // Get all sessions info
+  getAllSessions(): { id: string; status: string; project: string; createdAt: Date }[] {
+    const result: { id: string; status: string; project: string; createdAt: Date }[] = [];
+    this.sessions.forEach((session, id) => {
+      result.push({
+        id,
+        status: session.status,
+        project: session.project,
+        createdAt: session.createdAt
+      });
+    });
+    return result;
   }
 }
 
