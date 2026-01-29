@@ -1,5 +1,6 @@
 // src/whatsapp/baileys.manager.ts
 // Gestion des sessions Baileys (WhatsApp Web)
+// Supports both AIOD (agencies table) and WakhaFlow (stores table)
 
 import makeWASocket, {
   DisconnectReason,
@@ -18,6 +19,9 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const logger = pino({ level: 'warn' });
 
+// Supported projects
+type Project = 'aiod' | 'wakhaflow';
+
 interface Session {
   socket: WASocket | null;
   qrCode: string | null;
@@ -25,6 +29,8 @@ interface Session {
   phoneNumber: string | null;
   verifiedName: string | null;
   createdAt: Date;
+  project: Project;
+  webhookUrl: string | null;
 }
 
 class BaileysManager {
@@ -49,17 +55,50 @@ class BaileysManager {
     }
   }
 
-  // Create or reconnect session for agency
-  async createSession(agencyId: string): Promise<{ sessionId: string; qrCode: string | null; status: string }> {
-    // Check if agency exists
-    const { data: agency, error } = await this.supabase
-      .from('agencies')
-      .select('id, name')
-      .eq('id', agencyId)
-      .single();
+  // Create or reconnect session for agency/store
+  // project: 'aiod' (default) or 'wakhaflow'
+  async createSession(
+    agencyId: string,
+    options: { project?: Project; webhookUrl?: string } = {}
+  ): Promise<{ sessionId: string; qrCode: string | null; status: string }> {
+    const project = options.project || 'aiod';
+    const webhookUrl = options.webhookUrl || null;
 
-    if (error || !agency) {
-      throw new Error('Agency not found');
+    // Check if entity exists based on project
+    let entityExists = false;
+
+    if (project === 'wakhaflow') {
+      // For WakhaFlow, check stores table
+      const { data: store, error } = await this.supabase
+        .from('stores')
+        .select('id, name')
+        .eq('id', agencyId)
+        .single();
+
+      entityExists = !error && !!store;
+
+      if (!entityExists) {
+        // Auto-register: WakhaFlow doesn't require pre-registration
+        // Just verify the ID format is valid (UUID)
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (uuidRegex.test(agencyId)) {
+          console.log(`[BAILEYS] Auto-accepting WakhaFlow store: ${agencyId}`);
+          entityExists = true;
+        }
+      }
+    } else {
+      // For AIOD, check agencies table (original behavior)
+      const { data: agency, error } = await this.supabase
+        .from('agencies')
+        .select('id, name')
+        .eq('id', agencyId)
+        .single();
+
+      entityExists = !error && !!agency;
+    }
+
+    if (!entityExists) {
+      throw new Error(project === 'wakhaflow' ? 'Store not found' : 'Agency not found');
     }
 
     const sessionId = `baileys_${agencyId}`;
@@ -77,7 +116,9 @@ class BaileysManager {
       status: 'pending',
       phoneNumber: null,
       verifiedName: null,
-      createdAt: new Date()
+      createdAt: new Date(),
+      project,
+      webhookUrl
     };
 
     this.sessions.set(agencyId, session);
@@ -85,12 +126,13 @@ class BaileysManager {
     // Setup auth state
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
-    // Create socket
+    // Create socket with browser name based on project
+    const browserName = project === 'wakhaflow' ? 'WakhaFlow' : 'AIOD';
     const socket = makeWASocket({
       auth: state,
       printQRInTerminal: true,
       logger: logger as any,
-      browser: ['AIOD', 'Chrome', '120.0.0']
+      browser: [browserName, 'Chrome', '120.0.0']
     });
 
     session.socket = socket;
@@ -183,7 +225,7 @@ class BaileysManager {
         setTimeout(() => this.createSession(agencyId), 5000);
       }
     } else if (connection === 'open') {
-      console.log(`[BAILEYS] Connected for agency ${agencyId}`);
+      console.log(`[BAILEYS] Connected for ${session.project} entity ${agencyId}`);
       session.status = 'connected';
       session.qrCode = null;
 
@@ -194,27 +236,43 @@ class BaileysManager {
       session.phoneNumber = phoneNumber;
       session.verifiedName = verifiedName;
 
-      // Update agencies table with WhatsApp info
-      await this.supabase
-        .from('agencies')
-        .update({
-          whatsapp_phone_id: phoneNumber,
-          whatsapp_connection_type: 'baileys',
-          whatsapp_connected_at: new Date().toISOString()
-        })
-        .eq('id', agencyId);
+      // Update the appropriate table based on project
+      if (session.project === 'wakhaflow') {
+        // Update WakhaFlow stores table
+        await this.supabase
+          .from('stores')
+          .update({
+            bylis_session_id: agencyId,
+            bylis_phone: phoneNumber ? `+${phoneNumber}` : null,
+            bylis_status: 'connected'
+          })
+          .eq('id', agencyId);
+      } else {
+        // Update AIOD agencies table (original behavior)
+        await this.supabase
+          .from('agencies')
+          .update({
+            whatsapp_phone_id: phoneNumber,
+            whatsapp_connection_type: 'baileys',
+            whatsapp_connected_at: new Date().toISOString()
+          })
+          .eq('id', agencyId);
+      }
 
       await this.updateSessionInDB(agencyId, {
         status: 'connected',
         phone_number: phoneNumber,
         verified_name: verifiedName,
-        connected_at: new Date().toISOString()
+        connected_at: new Date().toISOString(),
+        project: session.project
       });
     }
   }
 
   // Handle incoming messages
   private async handleMessagesUpsert(agencyId: string, m: { messages: proto.IWebMessageInfo[], type: string }) {
+    const session = this.sessions.get(agencyId);
+
     for (const msg of m.messages) {
       if (msg.key.fromMe) continue; // Skip outgoing messages
 
@@ -230,33 +288,63 @@ class BaileysManager {
       // Log to events table
       await this.logEvent(agencyId, 'messages.upsert', msg);
 
-      // Store inbound message
-      await this.supabase.from('messages').insert({
-        agency_id: agencyId,
-        wa_message_id: messageId,
-        sender: 'client',
-        content: text,
-        raw_payload: msg,
-        created_at: new Date().toISOString()
-      }).then(({ error }) => {
-        if (error) console.error('[BAILEYS] Message insert error:', error);
-      });
-
-      // Forward to webhook-whatsapp-messages edge function
-      try {
-        await this.supabase.functions.invoke('webhook-whatsapp-messages', {
-          body: {
-            source: 'baileys',
-            agency_id: agencyId,
-            message: {
-              id: messageId,
-              from: from.replace('@s.whatsapp.net', ''),
-              text: text,
-              timestamp: msg.messageTimestamp,
-              type: msg.message?.imageMessage ? 'image' : 'text'
-            }
-          }
+      // Store inbound message based on project
+      if (session?.project === 'wakhaflow') {
+        // WakhaFlow uses different message structure
+        // Messages are stored via webhook, not directly here
+      } else {
+        // AIOD stores messages directly
+        await this.supabase.from('messages').insert({
+          agency_id: agencyId,
+          wa_message_id: messageId,
+          sender: 'client',
+          content: text,
+          raw_payload: msg,
+          created_at: new Date().toISOString()
+        }).then(({ error }) => {
+          if (error) console.error('[BAILEYS] Message insert error:', error);
         });
+      }
+
+      // Forward to appropriate webhook
+      try {
+        if (session?.webhookUrl) {
+          // Use custom webhook URL if provided
+          await fetch(session.webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              source: 'baileys',
+              project: session.project,
+              store_id: session.project === 'wakhaflow' ? agencyId : undefined,
+              agency_id: session.project === 'aiod' ? agencyId : undefined,
+              message: {
+                id: messageId,
+                from: from.replace('@s.whatsapp.net', ''),
+                text: text,
+                timestamp: msg.messageTimestamp,
+                type: msg.message?.imageMessage ? 'image' : 'text'
+              }
+            })
+          });
+        } else {
+          // Fallback to Supabase function invoke
+          await this.supabase.functions.invoke('webhook-whatsapp-messages', {
+            body: {
+              source: 'baileys',
+              project: session?.project || 'aiod',
+              store_id: session?.project === 'wakhaflow' ? agencyId : undefined,
+              agency_id: agencyId,
+              message: {
+                id: messageId,
+                from: from.replace('@s.whatsapp.net', ''),
+                text: text,
+                timestamp: msg.messageTimestamp,
+                type: msg.message?.imageMessage ? 'image' : 'text'
+              }
+            }
+          });
+        }
       } catch (err) {
         console.error('[BAILEYS] Forward to webhook error:', err);
       }

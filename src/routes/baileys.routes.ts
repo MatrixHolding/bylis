@@ -7,16 +7,24 @@ import { baileysManager } from '../whatsapp/baileys.manager';
 const router = Router();
 
 // POST /api/baileys/session - Créer/reconnecter une session
+// Supports both AIOD (agencies) and WakhaFlow (stores)
 router.post('/session', async (req: Request, res: Response) => {
   try {
-    const { agency_id } = req.body;
+    const { agency_id, store_id, project, webhook_url } = req.body;
 
-    if (!agency_id) {
-      return res.status(400).json({ error: 'Missing agency_id' });
+    // Support both agency_id (AIOD) and store_id (WakhaFlow)
+    const entityId = store_id || agency_id;
+    const detectedProject = store_id ? 'wakhaflow' : (project || 'aiod');
+
+    if (!entityId) {
+      return res.status(400).json({ error: 'Missing agency_id or store_id' });
     }
 
-    console.log(`[API] Creating session for agency ${agency_id}`);
-    const result = await baileysManager.createSession(agency_id);
+    console.log(`[API] Creating session for ${detectedProject} entity ${entityId}`);
+    const result = await baileysManager.createSession(entityId, {
+      project: detectedProject as 'aiod' | 'wakhaflow',
+      webhookUrl: webhook_url
+    });
 
     res.json(result);
   } catch (error: any) {

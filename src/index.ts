@@ -28,13 +28,14 @@ app.use('/api/baileys', baileysRoutes);
 app.get('/', (req, res) => {
   res.json({
     service: 'bylis',
-    description: 'Baileys WhatsApp Gateway for AIOD',
-    version: '1.0.0',
+    description: 'Baileys WhatsApp Gateway for AIOD & WakhaFlow',
+    version: '1.1.0',
+    supportedProjects: ['aiod', 'wakhaflow'],
     endpoints: {
       health: 'GET /api/baileys/health',
-      createSession: 'POST /api/baileys/session',
-      getSession: 'GET /api/baileys/session/:agencyId',
-      deleteSession: 'DELETE /api/baileys/session/:agencyId',
+      createSession: 'POST /api/baileys/session (body: agency_id OR store_id, optional: project, webhook_url)',
+      getSession: 'GET /api/baileys/session/:entityId',
+      deleteSession: 'DELETE /api/baileys/session/:entityId',
       sendMessage: 'POST /api/baileys/send'
     }
   });
