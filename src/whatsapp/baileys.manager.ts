@@ -68,23 +68,15 @@ class BaileysManager {
     let entityExists = false;
 
     if (project === 'wakhaflow') {
-      // For WakhaFlow, check stores table
-      const { data: store, error } = await this.supabase
-        .from('stores')
-        .select('id, name')
-        .eq('id', agencyId)
-        .single();
-
-      entityExists = !error && !!store;
-
-      if (!entityExists) {
-        // Auto-register: WakhaFlow doesn't require pre-registration
-        // Just verify the ID format is valid (UUID)
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        if (uuidRegex.test(agencyId)) {
-          console.log(`[BAILEYS] Auto-accepting WakhaFlow store: ${agencyId}`);
-          entityExists = true;
-        }
+      // For WakhaFlow, we auto-accept any valid UUID
+      // WakhaFlow has its own Supabase instance, so we can't check stores table from here
+      // The WakhaFlow edge function already validated the store exists before calling us
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (uuidRegex.test(agencyId)) {
+        console.log(`[BAILEYS] Auto-accepting WakhaFlow store: ${agencyId}`);
+        entityExists = true;
+      } else {
+        console.log(`[BAILEYS] Invalid store_id format: ${agencyId}`);
       }
     } else {
       // For AIOD, check agencies table (original behavior)
@@ -98,7 +90,7 @@ class BaileysManager {
     }
 
     if (!entityExists) {
-      throw new Error(project === 'wakhaflow' ? 'Store not found' : 'Agency not found');
+      throw new Error(project === 'wakhaflow' ? 'Invalid store_id format' : 'Agency not found');
     }
 
     const sessionId = `baileys_${agencyId}`;
@@ -238,15 +230,27 @@ class BaileysManager {
 
       // Update the appropriate table based on project
       if (session.project === 'wakhaflow') {
-        // Update WakhaFlow stores table
-        await this.supabase
-          .from('stores')
-          .update({
-            bylis_session_id: agencyId,
-            bylis_phone: phoneNumber ? `+${phoneNumber}` : null,
-            bylis_status: 'connected'
-          })
-          .eq('id', agencyId);
+        // For WakhaFlow, notify via webhook instead of direct DB update
+        // (WakhaFlow uses a different Supabase instance)
+        if (session.webhookUrl) {
+          try {
+            await fetch(session.webhookUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                source: 'baileys',
+                type: 'connection_update',
+                project: 'wakhaflow',
+                store_id: agencyId,
+                status: 'connected',
+                phone_number: phoneNumber ? `+${phoneNumber}` : null
+              })
+            });
+            console.log(`[BAILEYS] Notified WakhaFlow of connection for ${agencyId}`);
+          } catch (err) {
+            console.error('[BAILEYS] Failed to notify WakhaFlow:', err);
+          }
+        }
       } else {
         // Update AIOD agencies table (original behavior)
         await this.supabase
