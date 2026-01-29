@@ -17,7 +17,7 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const logger = pino({ level: 'warn' });
+const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' });
 
 // Supported projects
 type Project = 'aiod' | 'wakhaflow';
@@ -158,7 +158,7 @@ class BaileysManager {
         }
       }, 500);
 
-      // Timeout after 30 seconds
+      // Timeout after 60 seconds (Baileys can be slow on free tier)
       setTimeout(() => {
         clearInterval(checkInterval);
         const currentSession = this.sessions.get(agencyId);
@@ -167,7 +167,7 @@ class BaileysManager {
           qrCode: currentSession?.qrCode || null,
           status: currentSession?.status || 'pending'
         });
-      }, 30000);
+      }, 60000);
     });
   }
 
@@ -214,6 +214,15 @@ class BaileysManager {
 
       if (shouldReconnect) {
         console.log(`[BAILEYS] Reconnecting ${agencyId} (project: ${session.project})...`);
+        // Clean up old socket to prevent memory leak
+        if (session.socket) {
+          try {
+            session.socket.end(undefined);
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+          session.socket = null;
+        }
         // Pass the same project and webhook options for reconnection
         setTimeout(() => this.createSession(agencyId, {
           project: session.project,
