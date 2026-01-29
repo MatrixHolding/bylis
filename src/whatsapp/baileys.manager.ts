@@ -172,9 +172,11 @@ class BaileysManager {
     // Create socket with browser name based on project
     const browserName = project === 'wakhaflow' ? 'WakhaFlow' : 'AIOD';
     console.log(`[BAILEYS] Creating WASocket with browser: ${browserName}`);
+    console.log(`[BAILEYS] makeWASocket START at ${new Date().toISOString()}`);
 
+    let socket: WASocket;
     try {
-      const socket = makeWASocket({
+      socket = makeWASocket({
         auth: state,
         printQRInTerminal: true,
         logger: logger as any,
@@ -187,18 +189,25 @@ class BaileysManager {
         markOnlineOnConnect: false
       });
 
+      console.log(`[BAILEYS] makeWASocket DONE at ${new Date().toISOString()}`);
+      console.log(`[BAILEYS] Socket object created:`, typeof socket);
+      console.log(`[BAILEYS] Socket.ev exists:`, !!socket?.ev);
+
       session.socket = socket;
-      console.log(`[BAILEYS] Socket created successfully with extended timeouts`);
 
       // Handle connection events
+      console.log(`[BAILEYS] Attaching connection.update listener...`);
       socket.ev.on('connection.update', async (update) => {
-        console.log(`[BAILEYS] connection.update event:`, JSON.stringify(update, null, 2));
+        console.log(`[BAILEYS] === EVENT: connection.update ===`);
+        console.log(`[BAILEYS] Update received at ${new Date().toISOString()}`);
+        console.log(`[BAILEYS] Update data:`, JSON.stringify(update, null, 2));
         await this.handleConnectionUpdate(agencyId, update);
       });
+      console.log(`[BAILEYS] connection.update listener attached`);
 
       // Handle credentials update
       socket.ev.on('creds.update', () => {
-        console.log(`[BAILEYS] creds.update event - saving credentials`);
+        console.log(`[BAILEYS] === EVENT: creds.update ===`);
         saveCreds();
       });
 
@@ -207,8 +216,11 @@ class BaileysManager {
         await this.handleMessagesUpsert(agencyId, m);
       });
 
+      console.log(`[BAILEYS] All event listeners attached successfully`);
+
     } catch (socketError: any) {
       console.error(`[BAILEYS] Socket creation FAILED:`, socketError);
+      console.error(`[BAILEYS] Error stack:`, socketError.stack);
       session.status = 'disconnected';
       throw new Error(`Failed to create WhatsApp socket: ${socketError.message}`);
     }
