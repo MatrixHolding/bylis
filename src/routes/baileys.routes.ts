@@ -10,20 +10,33 @@ const router = Router();
 // Supports both AIOD (agencies) and WakhaFlow (stores)
 router.post('/session', async (req: Request, res: Response) => {
   try {
-    const { agency_id, store_id, project, webhook_url } = req.body;
+    const { agency_id, store_id, project, webhook_url, force_new_qr } = req.body;
 
     // Support both agency_id (AIOD) and store_id (WakhaFlow)
     const entityId = store_id || agency_id;
     const detectedProject = store_id ? 'wakhaflow' : (project || 'aiod');
 
     if (!entityId) {
+      console.log('[API] Missing entity ID');
       return res.status(400).json({ error: 'Missing agency_id or store_id' });
     }
 
-    console.log(`[API] Creating session for ${detectedProject} entity ${entityId}`);
+    console.log(`[API] === SESSION CREATE REQUEST ===`);
+    console.log(`[API] Entity ID: ${entityId}`);
+    console.log(`[API] Project: ${detectedProject}`);
+    console.log(`[API] Force new QR: ${force_new_qr || false}`);
+    console.log(`[API] Webhook URL: ${webhook_url || 'none'}`);
+
     const result = await baileysManager.createSession(entityId, {
       project: detectedProject as 'aiod' | 'wakhaflow',
-      webhookUrl: webhook_url
+      webhookUrl: webhook_url,
+      forceNewQR: force_new_qr === true
+    });
+
+    console.log(`[API] Session created:`, {
+      sessionId: result.sessionId,
+      status: result.status,
+      hasQR: !!result.qrCode
     });
 
     res.json(result);

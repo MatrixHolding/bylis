@@ -17,7 +17,10 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' });
+// Always use debug level for better visibility
+const logger = pino({ level: 'debug' });
+
+console.log('[BAILEYS] Module loaded - Baileys Manager initializing...');
 
 // Supported projects
 type Project = 'aiod' | 'wakhaflow';
@@ -57,12 +60,20 @@ class BaileysManager {
 
   // Create or reconnect session for agency/store
   // project: 'aiod' (default) or 'wakhaflow'
+  // forceNewQR: true to clear existing auth and generate fresh QR
   async createSession(
     agencyId: string,
-    options: { project?: Project; webhookUrl?: string } = {}
+    options: { project?: Project; webhookUrl?: string; forceNewQR?: boolean } = {}
   ): Promise<{ sessionId: string; qrCode: string | null; status: string }> {
     const project = options.project || 'aiod';
     const webhookUrl = options.webhookUrl || null;
+    const forceNewQR = options.forceNewQR ?? false;
+
+    console.log(`[BAILEYS] === createSession START ===`);
+    console.log(`[BAILEYS] Entity ID: ${agencyId}`);
+    console.log(`[BAILEYS] Project: ${project}`);
+    console.log(`[BAILEYS] Force new QR: ${forceNewQR}`);
+    console.log(`[BAILEYS] Webhook URL: ${webhookUrl || 'none'}`);
 
     // Check if entity exists based on project
     let entityExists = false;
@@ -87,25 +98,63 @@ class BaileysManager {
         .single();
 
       entityExists = !error && !!agency;
+      if (error) {
+        console.log(`[BAILEYS] Agency lookup error: ${error.message}`);
+      }
     }
 
     if (!entityExists) {
+      console.log(`[BAILEYS] Entity not found, throwing error`);
       throw new Error(project === 'wakhaflow' ? 'Invalid store_id format' : 'Agency not found');
     }
 
     const sessionId = `baileys_${agencyId}`;
     const authPath = path.join(this.authDir, agencyId);
 
+    // IMPORTANT: Cleanup existing session first
+    const existingSession = this.sessions.get(agencyId);
+    if (existingSession) {
+      console.log(`[BAILEYS] Cleaning up existing session for ${agencyId}`);
+      try {
+        if (existingSession.socket) {
+          existingSession.socket.ev.removeAllListeners('connection.update');
+          existingSession.socket.ev.removeAllListeners('creds.update');
+          existingSession.socket.ev.removeAllListeners('messages.upsert');
+          existingSession.socket.end(undefined);
+        }
+      } catch (e) {
+        console.log(`[BAILEYS] Cleanup error (ignored): ${e}`);
+      }
+      this.sessions.delete(agencyId);
+    }
+
+    // If forceNewQR, clear existing auth state
+    if (forceNewQR && fs.existsSync(authPath)) {
+      console.log(`[BAILEYS] Clearing existing auth state for fresh QR`);
+      try {
+        fs.rmSync(authPath, { recursive: true, force: true });
+      } catch (e) {
+        console.log(`[BAILEYS] Auth cleanup error: ${e}`);
+      }
+    }
+
     // Ensure auth path exists
     if (!fs.existsSync(authPath)) {
+      console.log(`[BAILEYS] Creating auth directory: ${authPath}`);
       fs.mkdirSync(authPath, { recursive: true });
     }
+
+    // Check if auth already exists (will reconnect instead of QR)
+    const authFiles = fs.readdirSync(authPath);
+    const hasExistingAuth = authFiles.length > 0;
+    console.log(`[BAILEYS] Auth directory contents: ${authFiles.length} files`);
+    console.log(`[BAILEYS] Has existing auth: ${hasExistingAuth}`);
 
     // Initialize session object
     const session: Session = {
       socket: null,
       qrCode: null,
-      status: 'pending',
+      status: 'connecting',
       phoneNumber: null,
       verifiedName: null,
       createdAt: new Date(),
@@ -116,39 +165,62 @@ class BaileysManager {
     this.sessions.set(agencyId, session);
 
     // Setup auth state
+    console.log(`[BAILEYS] Setting up auth state...`);
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
+    console.log(`[BAILEYS] Auth state loaded`);
 
     // Create socket with browser name based on project
     const browserName = project === 'wakhaflow' ? 'WakhaFlow' : 'AIOD';
-    const socket = makeWASocket({
-      auth: state,
-      printQRInTerminal: true,
-      logger: logger as any,
-      browser: [browserName, 'Chrome', '120.0.0']
-    });
+    console.log(`[BAILEYS] Creating WASocket with browser: ${browserName}`);
 
-    session.socket = socket;
+    try {
+      const socket = makeWASocket({
+        auth: state,
+        printQRInTerminal: true,
+        logger: logger as any,
+        browser: [browserName, 'Chrome', '120.0.0']
+      });
 
-    // Handle connection events
-    socket.ev.on('connection.update', async (update) => {
-      await this.handleConnectionUpdate(agencyId, update);
-    });
+      session.socket = socket;
+      console.log(`[BAILEYS] Socket created successfully`);
 
-    // Handle credentials update
-    socket.ev.on('creds.update', saveCreds);
+      // Handle connection events
+      socket.ev.on('connection.update', async (update) => {
+        console.log(`[BAILEYS] connection.update event:`, JSON.stringify(update, null, 2));
+        await this.handleConnectionUpdate(agencyId, update);
+      });
 
-    // Handle incoming messages
-    socket.ev.on('messages.upsert', async (m) => {
-      await this.handleMessagesUpsert(agencyId, m);
-    });
+      // Handle credentials update
+      socket.ev.on('creds.update', () => {
+        console.log(`[BAILEYS] creds.update event - saving credentials`);
+        saveCreds();
+      });
+
+      // Handle incoming messages
+      socket.ev.on('messages.upsert', async (m) => {
+        await this.handleMessagesUpsert(agencyId, m);
+      });
+
+    } catch (socketError: any) {
+      console.error(`[BAILEYS] Socket creation FAILED:`, socketError);
+      session.status = 'disconnected';
+      throw new Error(`Failed to create WhatsApp socket: ${socketError.message}`);
+    }
 
     // Wait for QR code or connection
+    console.log(`[BAILEYS] Waiting for QR code or connection (max 90s)...`);
     return new Promise((resolve) => {
+      let resolved = false;
+
       const checkInterval = setInterval(() => {
         const currentSession = this.sessions.get(agencyId);
-        if (currentSession) {
+        if (currentSession && !resolved) {
+          console.log(`[BAILEYS] Polling: status=${currentSession.status}, hasQR=${!!currentSession.qrCode}`);
+
           if (currentSession.qrCode || currentSession.status === 'connected') {
+            resolved = true;
             clearInterval(checkInterval);
+            console.log(`[BAILEYS] Resolving with status: ${currentSession.status}`);
             resolve({
               sessionId,
               qrCode: currentSession.qrCode,
@@ -156,46 +228,67 @@ class BaileysManager {
             });
           }
         }
-      }, 500);
+      }, 1000); // Check every 1 second instead of 500ms
 
-      // Timeout after 60 seconds (Baileys can be slow on free tier)
+      // Timeout after 90 seconds (increased from 60)
       setTimeout(() => {
-        clearInterval(checkInterval);
-        const currentSession = this.sessions.get(agencyId);
-        resolve({
-          sessionId,
-          qrCode: currentSession?.qrCode || null,
-          status: currentSession?.status || 'pending'
-        });
-      }, 60000);
+        if (!resolved) {
+          resolved = true;
+          clearInterval(checkInterval);
+          const currentSession = this.sessions.get(agencyId);
+          console.log(`[BAILEYS] TIMEOUT - Resolving with current state: status=${currentSession?.status}, hasQR=${!!currentSession?.qrCode}`);
+          resolve({
+            sessionId,
+            qrCode: currentSession?.qrCode || null,
+            status: currentSession?.status || 'timeout'
+          });
+        }
+      }, 90000);
     });
   }
 
   // Handle connection updates
   private async handleConnectionUpdate(agencyId: string, update: Partial<ConnectionState>) {
     const session = this.sessions.get(agencyId);
-    if (!session) return;
+    if (!session) {
+      console.log(`[BAILEYS] handleConnectionUpdate: No session found for ${agencyId}`);
+      return;
+    }
 
     const { connection, lastDisconnect, qr } = update;
+    console.log(`[BAILEYS] handleConnectionUpdate for ${agencyId}:`, {
+      connection,
+      hasQR: !!qr,
+      qrLength: qr?.length,
+      lastDisconnectReason: (lastDisconnect?.error as Boom)?.output?.statusCode
+    });
 
-    // Log event to Supabase
-    await this.logEvent(agencyId, 'connection.update', update);
+    // Log event to Supabase (non-blocking)
+    this.logEvent(agencyId, 'connection.update', update).catch(e =>
+      console.log(`[BAILEYS] Event log error (ignored): ${e}`)
+    );
 
     // QR Code received
     if (qr) {
+      console.log(`[BAILEYS] === QR CODE RECEIVED ===`);
+      console.log(`[BAILEYS] QR string length: ${qr.length}`);
+      console.log(`[BAILEYS] QR preview: ${qr.substring(0, 50)}...`);
+
       try {
         const qrDataUrl = await QRCode.toDataURL(qr);
         session.qrCode = qrDataUrl;
         session.status = 'pending';
-        console.log(`[BAILEYS] QR generated for agency ${agencyId}`);
+        console.log(`[BAILEYS] QR DataURL generated successfully (length: ${qrDataUrl.length})`);
+        console.log(`[BAILEYS] QR DataURL preview: ${qrDataUrl.substring(0, 80)}...`);
 
-        // Update session in DB
-        await this.updateSessionInDB(agencyId, {
+        // Update session in DB (non-blocking)
+        this.updateSessionInDB(agencyId, {
           status: 'pending',
           qr_code: qrDataUrl
-        });
-      } catch (err) {
-        console.error('[BAILEYS] QR generation error:', err);
+        }).catch(e => console.log(`[BAILEYS] Session DB update error: ${e}`));
+      } catch (err: any) {
+        console.error('[BAILEYS] QR generation FAILED:', err);
+        console.error('[BAILEYS] QR generation error details:', err.stack || err.message);
       }
     }
 
