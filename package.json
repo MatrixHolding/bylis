@@ -9,24 +9,30 @@
     "dev": "ts-node src/index.ts",
     "postinstall": "npm run build"
   },
-  "keywords": ["whatsapp", "baileys", "gateway"],
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "gateway"
+  ],
   "author": "AIOD",
   "license": "MIT",
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.16",
     "@supabase/supabase-js": "^2.39.3",
+    "@whiskeysockets/baileys": "^6.7.16",
     "express": "^4.18.2",
+    "https-proxy-agent": "^7.0.6",
     "pino": "^8.17.2",
     "qrcode": "^1.5.3",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "socks-proxy-agent": "^8.0.5"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.6",
     "@types/qrcode": "^1.5.5",
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   },
   "engines": {
     "node": ">=18.0.0"

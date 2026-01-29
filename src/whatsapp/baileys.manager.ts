@@ -16,6 +16,8 @@ import * as path from 'path';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // Always use debug level for better visibility
 const logger = pino({ level: 'debug' });
@@ -191,6 +193,25 @@ class BaileysManager {
     debugLog(`Creating WASocket with browser: ${browserName}`);
     debugLog(`makeWASocket START`);
 
+    // Setup proxy if configured
+    // Supports: SOCKS5 (socks5://host:port) or HTTPS (https://host:port)
+    const proxyUrl = process.env.PROXY_URL;
+    let agent: any = undefined;
+    let fetchAgent: any = undefined;
+
+    if (proxyUrl) {
+      debugLog(`Using proxy: ${proxyUrl.replace(/:[^:@]+@/, ':***@')}`); // Hide password in logs
+      if (proxyUrl.startsWith('socks')) {
+        agent = new SocksProxyAgent(proxyUrl);
+        fetchAgent = new SocksProxyAgent(proxyUrl);
+      } else {
+        agent = new HttpsProxyAgent(proxyUrl);
+        fetchAgent = new HttpsProxyAgent(proxyUrl);
+      }
+    } else {
+      debugLog(`No proxy configured - using direct connection`);
+    }
+
     let socket: WASocket;
     try {
       socket = makeWASocket({
@@ -203,7 +224,9 @@ class BaileysManager {
         defaultQueryTimeoutMs: 60000,
         qrTimeout: 60000,
         retryRequestDelayMs: 500,
-        markOnlineOnConnect: false
+        markOnlineOnConnect: false,
+        agent,
+        fetchAgent
       });
 
       debugLog(`makeWASocket DONE`, { socketType: typeof socket, hasEv: !!socket?.ev });
