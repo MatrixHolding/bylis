@@ -212,6 +212,10 @@ class BaileysManager {
       debugLog(`No proxy configured - using direct connection`);
     }
 
+    // FIX for 405 error: Hardcode WhatsApp version to avoid version mismatch
+    // See: https://github.com/WhiskeySockets/Baileys/issues/1939
+    const WHATSAPP_VERSION: [number, number, number] = [2, 3000, 1027934701];
+
     let socket: WASocket;
     try {
       socket = makeWASocket({
@@ -219,6 +223,7 @@ class BaileysManager {
         printQRInTerminal: true,
         logger: logger as any,
         browser: [browserName, 'Chrome', '120.0.0'],
+        version: WHATSAPP_VERSION,
         syncFullHistory: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
